@@ -32,6 +32,7 @@ Conditional_DDPM/
 ├── evaluator.py                             # Pretrained ResNet-18 evaluator
 ├── checkpoint.pth                           # Evaluator weights
 ├── objects.json                             # 24 object label-to-index map
+├── script.sh                                # script to run train and sample
 ├── train.json                               # Training metadata (18,009 samples)
 ├── test.json                                # Test set 1 (32 conditions)
 ├── new_test.json                            # Test set 2 (32 conditions)
