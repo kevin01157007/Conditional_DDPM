@@ -62,25 +62,25 @@ pip install torch torchvision diffusers accelerate tqdm pillow
 Run `train.py` to train the Conditional DDPM with Classifier-Free Guidance (CFG):
 
 ```bash
-python train.py \
-    --data_dir ./iclevr \
+python src/train.py \
+    --data_dir ./data/iclevr \
     --train_json ./train.json \
     --objects_json ./objects.json \
     --output_dir ./checkpoints \
-    --epochs 150 \
+    --epochs 50 \
     --batch_size 64 \
     --lr 1e-4 \
-    --cfg_Scale 3.5
+    --guidance_scale 3.5
 ```
 
 * Model checkpoints and periodic validation accuracy logs will be saved to `./checkpoints/`.
 
 ### 4. Inference, Evaluation & Visualization
 
-Run `sample.py` to generate the required images for `test.json` and `new_test.json`, compute Top-$k$ accuracies using `evaluator.py`, and export all required grids:
+Run `sample.py` to generate the required images for `test.json` and `new_test.json`, compute Top-k accuracies using `evaluator.py`, and export all required grids:
 
 ```bash
-python sample.py \
+python src/sample.py \
     --ckpt ./checkpoints/best_model.pth \
     --test_json ./test.json \
     --new_test_json ./new_test.json \
