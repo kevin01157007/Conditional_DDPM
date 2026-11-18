@@ -1,6 +1,6 @@
 # Conditional DDPM for Multi-Label Image Generation (i-CLEVR)
 
-This repository implements a **Conditional Denoising Diffusion Probabilistic Model (Conditional DDPM)** for multi-label image generation on the **i-CLEVR** dataset (Deep Learning Lab 6, Fall 2026). Given a set of 1 to 3 object descriptions (8 colors $\times$ 3 shapes = 24 categories), the model synthesizes $64 \times 64$ images containing the specified objects.
+This repository implements a **Conditional Denoising Diffusion Probabilistic Model (Conditional DDPM)** for multi-label image generation on the **i-CLEVR** dataset (Deep Learning Lab 6, Fall 2026, NYCU). Given a set of 1 to 3 object descriptions (8 colors $\times$ 3 shapes = 24 categories), the model synthesizes $64 \times 64$ images containing the specified objects.
 
 ---
 
@@ -9,30 +9,34 @@ This repository implements a **Conditional Denoising Diffusion Probabilistic Mod
 ```text
 Conditional_DDPM/
 ├── spec/
-│   └── Lab6_Conditional_DDPM_2026_Fall.pdf  # Lab specification and grading rubric
-├── iclevr/                                  # Training images directory (download separately)
-│   ├── CLEVR_train_000000_0.png
-│   └── ...
-├── checkpoints/                             # Saved DDPM model weights during training
+│   └── Lab6_Conditional_DDPM_2026_Fall.pdf  # Lab specification
+├── data/
+│   └── iclevr/                              # Training images (download separately)
+│       ├── CLEVR_train_000000_0.png
+│       └── ...
+├── checkpoints/                             # Saved model weights
 │   └── best_model.pth
-├── images/                                  # Generated outputs for submission & report
-│   ├── test/                                # 32 individual PNGs (0.png ~ 31.png) for test.json
-│   ├── new_test/                            # 32 individual PNGs (0.png ~ 31.png) for new_test.json
-│   ├── grid_test.png                        # 8x4 image grid for test.json
-│   ├── grid_new_test.png                    # 8x4 image grid for new_test.json
-│   └── denoising_process.png                # Step-by-step denoising grid for specified condition
-├── dataset.py                               # i-CLEVR PyTorch Dataset & DataLoader (multi-hot encoding)
-├── model.py                                 # Conditional U-Net & multi-label condition embedding
-├── train.py                                 # Training script (with Classifier-Free Guidance & EMA)
-├── sample.py                                # Sampling, evaluation, and grid visualization script
-├── evaluator.py                             # Provided pretrained ResNet-18 evaluator (DO NOT MODIFY logic)
-├── checkpoint.pth                           # Provided pretrained ResNet-18 weights for evaluator.py
-├── objects.json                             # Mapping from 24 object names to indices (0 ~ 23)
-├── train.json                               # Training metadata (18,009 image filenames & label sets)
-├── test.json                                # Testing conditions set 1 (32 multi-label sets)
-├── new_test.json                            # Testing conditions set 2 (32 multi-label sets)
-├── readme.txt                               # Original dataset & evaluator description
-└── README.md                                # Project documentation & quick start guide
+├── images/                                  # Generated outputs
+│   ├── test/                                # test.json PNGs (0.png ~ 31.png)
+│   ├── new_test/                            # new_test.json PNGs (0.png ~ 31.png)
+│   ├── grid_test.png                        # 8x4 grid for test.json
+│   ├── grid_new_test.png                    # 8x4 grid for new_test.json
+│   └── denoising_process.png                # Denoising steps grid
+├── model/
+│   ├── unet.py                              # Conditional U-Net & label embedding
+│   └── diffusion.py                         # Noise schedule, CFG & sampling logic
+├── src/
+│   ├── dataset.py                           # i-CLEVR Dataset & DataLoader
+│   ├── train.py                             # Training script (CFG & EMA)
+│   └── sample.py                            # Inference, evaluation & visualization
+├── evaluator.py                             # Pretrained ResNet-18 evaluator
+├── checkpoint.pth                           # Evaluator weights
+├── objects.json                             # 24 object label-to-index map
+├── train.json                               # Training metadata (18,009 samples)
+├── test.json                                # Test set 1 (32 conditions)
+├── new_test.json                            # Test set 2 (32 conditions)
+├── readme.txt                               # Original dataset description
+└── README.md                                # Project documentation
 ```
 
 ---
@@ -91,25 +95,3 @@ Running this script will automatically produce:
 - `images/grid_test.png` and `images/grid_new_test.png` ($8 \times 4$ grids)
 - `images/denoising_process.png` (at least 8 denoising steps for `{"blue cube", "yellow sphere", "purple cylinder"}`)
 - Console output of the evaluator accuracy for both `test.json` and `new_test.json`
-
----
-
-## Submission Checklist
-
-Package the following files into `DL_LAB6_{studentID}_{YOUR_NAME}.zip` (do **not** include `iclevr/` dataset or `checkpoint.pth`):
-
-```text
-DL_LAB6_{studentID}_{YOUR_NAME}.zip
-├── DL_LAB6_{studentID}_{YOUR_NAME}.pdf
-├── dataset.py
-├── model.py
-├── train.py
-├── sample.py
-└── images/
-    ├── test/
-    │   ├── 0.png
-    │   └── ... 31.png
-    └── new_test/
-        ├── 0.png
-        └── ... 31.png
-```
