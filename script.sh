@@ -3,7 +3,7 @@ python src/train.py \
     --train_json ./train.json \
     --objects_json ./objects.json \
     --output_dir ./checkpoints \
-    --epochs 50 \
+    --epochs 150 \
     --batch_size 64 \
     --lr 1e-4 \
     --guidance_scale 3.5
@@ -17,4 +17,4 @@ python src/sample.py \
     --output_dir ./images \
     --guidance_scale 3.5 \
     --num_inference_steps 100 \
-    --sampler ddim
+    --sampler ddpm

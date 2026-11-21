@@ -55,7 +55,7 @@ pip install torch torchvision diffusers accelerate tqdm pillow
 ### 2. Dataset Preparation
 
 1. Download the `iclevr` training images from the course Google Drive link provided in the specification.
-2. Extract the image files into `d:/Conditional_DDPM/iclevr/` so that paths like `iclevr/CLEVR_train_001032_0.png` match the keys in `train.json`.
+2. Extract the image files into `Conditional_DDPM/iclevr/` so that paths like `iclevr/CLEVR_train_001032_0.png` match the keys in `train.json`.
 3. Ensure `checkpoint.pth` (the evaluator weight file) is in the root directory `./checkpoint.pth`.
 
 ### 3. Training
