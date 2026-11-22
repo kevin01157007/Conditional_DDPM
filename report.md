@@ -85,7 +85,7 @@ def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Te
 ```
 
 ### Noise schedule
-在 Forward Diffusion Process 中，我使用 `DDPMScheduler` 管理時間步 $T = 1000$ 的雜訊排程，並支援 `squaredcos_cap_v2`（Cosine schedule）與 `linear` 排程。針對 $64 \times 64$ 這類解析度較低的影像，Cosine schedule（`squaredcos_cap_v2`）能讓 $\bar{\alpha}_t$ 以平滑的餘弦曲線遞減，避免像傳統 Linear schedule 在擴散前期過快破壞影像結構、或在後期殘留過多純雜訊時間步；而 Linear schedule（$\beta_1 = 10^{-4}$ 至 $\beta_T = 0.02$）則提供穩定且經典的基準對照。給定乾淨影像 $\mathbf{x}_0$ 與任意時間步 $t$，可透過 closed-form 公式直接抽樣出加噪影像 $\mathbf{x}_t = \sqrt{\bar{\alpha}_t}\mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_t}\boldsymbol{\epsilon}$。
+在 Forward Diffusion Process 中，我使用 `DDPMScheduler` 管理時間步 $T = 1000$ 的雜訊排程，並支援 `squaredcos_cap_v2`（Cosine schedule）與 `linear` 排程。針對 $64 \times 64$ 這類解析度較低的影像，Cosine schedule（`squaredcos_cap_v2`）能讓 $\bar{\alpha}_t$ 以平滑的餘弦曲線遞減，避免像傳統 Linear schedule 在擴散前期過快破壞影像結構、或在後期殘留過多純雜訊時間步；而 Linear schedule（$\beta_1 = 10^{-4}$ 至 $\beta_T = 0.02$）則提供穩定的 baseline。給定乾淨影像 $\mathbf{x}_0$ 與任意時間步 $t$，可透過 closed-form 直接抽樣出 noise image $\mathbf{x}_t = \sqrt{\bar{\alpha}_t}\mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_t}\boldsymbol{\epsilon}$。
 
 ```python
 # model/diffusion.py
@@ -106,7 +106,7 @@ def q_sample(self, x_0: torch.Tensor, t: torch.Tensor, noise: Optional[torch.Ten
 ```
 
 ### Timestep embedding
-為了讓 U-Net 知到當前影像處於哪一個去噪階段，離散的時間步 $t \sim \text{Uniform}(\{0, \dots, T-1\})$ 會先透過 Sinusoidal Positional Embedding 轉換為 128 維的連續頻率特徵向量，接著在 `UNet2DModel` 內部經過兩層 Linear layer 與 `SiLU` activation 映射至 `time_embed_dim = 512` 維度。此 timestep embedding 會與前述同樣為 512 維的 condition embedding 直接相加（$\mathbf{e} = \mathbf{e}_t + \mathbf{e}_y$），再傳入各個 ResNet block 進行特徵調變（feature modulation），使模型能在不同 noise level 下動態調整對條件訊號與幾何輪廓的關注程度。
+為了讓 U-Net 知到當前影像處於哪一個去噪階段，時間步 $t \sim \text{Uniform}(\{0, \dots, T-1\})$ 會先透過 Sinusoidal Positional Embedding 轉換為 128 維的連續頻率特徵向量，接著在 `UNet2DModel` 內部經過兩層 Linear layer 與 `SiLU` activation 映射至 `time_embed_dim = 512` 維度。此 timestep embedding 會與前述同樣為 512 維的 condition embedding 直接相加（$\mathbf{e} = \mathbf{e}_t + \mathbf{e}_y$），再傳入各個 ResNet block 進行 feature modulation，使模型能在不同 noise level 下動態調整對 condition 與幾何輪廓的關注程度。
 
 ```python
 # model/diffusion.py
@@ -121,9 +121,9 @@ pred = model(x_t, t, y_cond)
 ```
 
 ### Loss
-模型採用 $\epsilon$-prediction（`prediction_type="epsilon"`）作為學習目標，即訓練網路預測在 Forward Process 中所加入的 Gaussian noise $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$，並以 Mean Squared Error (MSE) 作為損失函數：
+模型採用 $\epsilon$-prediction（`prediction_type="epsilon"`）作為學習目標，即訓練神經網路預測在 Forward Process 中所加入的 Gaussian noise $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$，並以 Mean Squared Error (MSE) 作為損失函數：
 $$\mathcal{L}_{\text{simple}} = \mathbb{E}_{\mathbf{x}_0, \mathbf{y}, t, \boldsymbol{\epsilon}} \left[ \| \boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \tilde{\mathbf{y}}) \|_2^2 \right]$$
-為了在推論階段啟用 CFG，訓練過程中我實作了 `drop_condition` 機制：每個樣本有 $p_{\text{uncond}} = 0.1$ 的機率將其 multi-hot 條件向量 $\mathbf{y}$ 清零為 $\mathbf{0}$，使同一個 U-Net 同時學會 conditional 與 unconditional 的去噪分佈。
+為了強化生成影像對 **multi-label condition**的準確率，我採用了 **Classifier-Free Guidance (CFG)**。相較於傳統 Classifier Guidance 需要額外在各種加噪程度的影像 $\mathbf{x}_t$ 上訓練一個獨立的分類器並計算梯度，CFG 的核心思想是**讓同一個 U-Net 同時學習有條件（conditional, $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y})$）與無條件（unconditional, $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0})$）的雜訊預測**，並在**推論**時利用兩者的差值作為 implicit classifier gradient 的方向進行強化。$$\hat{\boldsymbol{\epsilon}} = \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) + w \cdot \underbrace{\left( \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y}) - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) \right)}_{\text{implicit classifier gradient direction}}$$ 為此，在訓練過程中我實作了 `drop_condition` 機制：每個樣本有 $p_{\text{uncond}} = 0.1$ 的機率將其 multi-hot 條件向量 $\mathbf{y}$ 清零為 null condition $\mathbf{0}$，使單一模型兼具條件與無條件生成能力。
 
 ```python
 # model/diffusion.py
@@ -142,12 +142,13 @@ def training_loss(self, model: nn.Module, x_0: torch.Tensor, y: torch.Tensor) ->
 ```
 
 ### Sampling method
-在反向生成階段，我整合了 Classifier-Free Guidance (CFG) 與支援 `DDPM` / `DDIM` 的彈性取樣流程。從標準常態分佈抽樣出初始雜訊 $\mathbf{x}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ 後，在每一個時間步 $t$，我將 unconditional 輸入（$\mathbf{0}$）與 conditional 輸入（$\mathbf{y}$）沿著 batch 維度拼接為 $2B$ 大小，藉由單次 forward pass 同時取得 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0})$ 與 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y})$，再透過 guidance scale $w$（預設為 `3.5`）進行線性外插：
+在反向生成階段，我整合了 Classifier-Free Guidance (CFG) 與能夠支援 `DDPM` / `DDIM` 兩種取樣流程。從標準常態分佈抽樣出初始雜訊 $\mathbf{x}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ 後，在每一個時間步 $t$，我將 unconditional 輸入（$\mathbf{0}$）與 conditional 輸入（$\mathbf{y}$）沿著 batch 維度拼接為 $2B$ 大小，藉由單次 forward pass 同時取得 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0})$ 與 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y})$，再透過 guidance scale $w$（預設為 `3.5`）進行線性外插：
 $$\hat{\boldsymbol{\epsilon}} = \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) + w \cdot \left( \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y}) - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) \right)$$
 設定 $w > 1.0$ 能顯著強化生成影像與指定物件顏色、形狀的一致性，大幅提升 ResNet-18 evaluator 的辨識準確率。此外，透過 `_build_sampler` 切換 `DDPMScheduler` 或 `DDIMScheduler`，不僅能以經典的 DDPM 隨機反向過程取樣，也能利用 DDIM 在 `100` 步內快速完成高品質的確定性（$\eta = 0.0$）推論，並在每步將輸出 clamp 至 $[-1, 1]$ 以維持數值穩定。
 * **DDPM (`DDPMScheduler`)**：遵循隨機 Markovian 反向過程，每步加入隨機雜訊 $\sigma_t \mathbf{z}$：
   $$\mathbf{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}}\left(\mathbf{x}_t - \frac{1 - \alpha_t}{\sqrt{1 - \bar{\alpha}_t}}\hat{\boldsymbol{\epsilon}}_\theta\right) + \sigma_t \mathbf{z}, \quad \mathbf{z} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$$
-* **DDIM (`DDIMScheduler`)**：利用 Non-Markovian 跳步過程，當設定 $\eta = 0.0$ 時即為 deterministic 的 ODE 求解器，能以 `100` 個子時間步快速生成清晰且具高重現性的影像。此外，`sample()` 方法內建了 `return_trajectory` 機制，會等距記錄從純雜訊到最終成品共 8 個關鍵時間點的去噪 snapshot。
+* **DDIM (`DDIMScheduler`)**：利用 Non-Markovian 跳步過程，當設定 $\eta = 0.0$ 時即為 deterministic 的 ODE 求解器，能以 `100` 個子時間步快速生成清晰且具高重現性的影像。
+此外，`sample()` 方法內建了 `return_trajectory` 機制，會等距記錄從純雜訊到最終成品共 8 個間點的 denosie snapshot。
 
 ```python
 # model/diffusion.py
@@ -218,6 +219,8 @@ Show both generated-image grids, the required denoisingprocess grid, and discuss
   <img src="images/denoising_process.png" alt="替代文字">
   <figcaption style="text-align:center;"><sub><b>Figure 3:</b> Denoising process</sub></figcaption>
 </figure>
+
+Figure 3 顯示出，從標準常態分佈 $N(0,I)$ 採樣出來的 Gaussian Noise，不帶有任何資訊，透過訓練好的 U-Net 逐步預測並減去雜訊，最後收斂出符合目標分佈與 Condition 的結果。
 
 <figure align="center">
   <img src="images/grid_test.png" alt="替代文字">
