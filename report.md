@@ -3,7 +3,7 @@
 ---
 
 ## Introduction
-在本次作業中，我將在 i-CLEVR 資料集上實作一個用於多標籤影像生成的 Conditional Denoising Diffusion Probabilistic Model, DDPM，給定一組物件標籤（例如「綠色球體」、「灰色立方體」），模型要能生成包含這些指定物件的影像。與 unconditional generator 不同，此 denoising model 在每一個 reverse step 中，會同時利用noisy image 以及 object-label condition 來進行運算。最後會探討 model design、conditioning、noise schedules,and sampling choices 如何影響結果。系統會透過一個既定的 classifier，評估生成的影像是否包含所要求的物件。
+在本次作業中，我將在 i-CLEVR 資料集上實作一個用於 **multi-label** 影像生成的 Conditional Denoising Diffusion Probabilistic Model, DDPM，給定一組物件標籤（例如「綠色球體」、「灰色立方體」），模型要能生成包含這些指定物件的影像。與 unconditional generator 不同，此 denoising model 在每一個 reverse step 中，會同時利用noisy image 以及 object-label condition 來進行運算。最後會探討 model design、conditioning、noise schedules,and sampling choices 如何影響結果。系統會透過一個既定的 classifier，評估生成的影像是否包含所要求的物件。
 
 <figure align="center">
   <img src="assets/ConditionalDDPMgeneration.png" alt="替代文字">
@@ -15,7 +15,7 @@
 ---
 
 ### Data preprocessing & augmentation
-在資料前處理階段（src/dataset.py），ICLEVRDataset 會將原始影像統一 resize 至 $64 \times 64$，並透過 `transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))` 將像素值從 $[0,1]$線性映射至 $[−1,1]$，使其與擴散模型最終的標準高斯雜訊先驗分佈 $N(0,I)$ 的數值範圍對齊。在 **Data Augmentation** 方面，由於 i-CLEVR 的條件僅指定「出現哪些顏色與形狀的物件」（例如 ["blue cube", "yellow sphere"]），並未限制物件在畫面中的左右相對位置，且3D場景中的光源與地面幾何在水平翻轉下依然合理，因此我引入了機率為 0.5 的 `RandomHorizontalFlip`。這能將訓練樣本的多樣性提高一倍並避免模型記住固定構圖；相對地，我刻意不使用垂直翻轉或 Color Jitter ，以免破壞地板與陰影的物理方向或改變物件的顏色標籤語意。
+在資料前處理階段（src/dataset.py），ICLEVRDataset 會將原始影像統一 resize 至 $64 \times 64$，並透過 `transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))` 將像素值從 $[0,1]$線性映射至 $[−1,1]$，使其與 diffusion model 最終的 **Gaussion Noise** 先驗分佈 $N(0,I)$ 的數值範圍對齊。在 **Data Augmentation** 方面，由於 i-CLEVR 的條件僅指定「出現哪些顏色與形狀的物件」（例如 ["blue cube", "yellow sphere"]），並未限制物件在畫面中的左右相對位置，且3D場景中的光源與地面幾何在水平翻轉下依然合理，因此我引入了機率為 0.5 的 `RandomHorizontalFlip`。這能將訓練樣本的多樣性提高一倍並避免模型記住固定構圖；相對地，刻意不使用垂直翻轉或 Color Jitter ，以免破壞地板與陰影的物理方向或改變物件的顏色標籤語意。
 ```python
 # src/dataset.py
 tf_list = [transforms.Resize((image_size, image_size))]
@@ -73,9 +73,9 @@ self.unet = UNet2DModel(
 ---
 
 ### Condition embedding
-由於 i-CLEVR 是  multi-label 生成任務（每張圖包含 1 至 3 個物件，共 24 種物件類別），無法直接使用單一類別索引的 `nn.Embedding` 查找表。因此，我先將每筆資料的物件轉為24維的 multi-hot 浮點數向量 $\mathbf{y} \in \{0, 1\}^{24}$，接著透過一個兩層的 Multi-Layer Perceptron (`label_emb`)，搭配 `SiLU` activation function，將 24 維的條件向量投影至與 timestep embedding 相同的維度（`time_embed_dim = block_out_channels[0] * 4 = 512`）。
+由於 i-CLEVR 是  multi-label 生成任務（每張圖包含 1 至 3 個物件，共 24 種物件類別），無法直接使用單一類別索引的 `nn.Embedding` 查找表。因此，先將每筆資料的物件轉為24維的 multi-hot 浮點數向量 $\mathbf{y} \in \{0, 1\}^{24}$，接著透過一個兩層的 Multi-Layer Perceptron (`label_emb`)，搭配 `SiLU` activation function，將 24 維的條件向量投影至與 **timestep embedding** 相同的維度（`time_embed_dim = block_out_channels[0] * 4 = 512`）。
 
-把 `UNet2DModel` 的 `class_embed_type` 設為 `"identity"` ，這是因為 `UNet2DModel` 預設的 `class_embed_type` 只支援單一整數 ID 的查表。這裡設定為 `"identity"`（恆等映射），意思是告訴 `UNet2DModel`：不要用內建的 embedding 層處理 `class_labels` 了，我傳進去的值已經是我自己算好的 512 維向量，直接把它加到 time_emb 上。投影後的 512 維 condition embedding 就能透過 `class_labels` 參數直接傳入 U-Net，在內部與 timestep embedding 相加融合，並注入至每一個 ResNet block 中。此外，這種以線性層處理 multi-hot 向量的設計能自然支援 Classifier-Free Guidance (CFG)：當訓練或推論需要 unconditional 輸入時，只需傳入全為 0 的向量 $\mathbf{0} \in \mathbb{R}^{24}$ 即可作為 null condition。
+把 `UNet2DModel` 的 `class_embed_type` 設為 `"identity"` ，這是因為 `UNet2DModel` 預設的 `class_embed_type` 只支援單一整數 ID 的查表。這裡設定為 `"identity"`（恆等映射），意思是告訴 `UNet2DModel`：不要用內建的 embedding 層處理 `class_labels` 了，我傳進去的值已經是我自己算好的 512 維向量，直接把它加到 time_emb 上。投影後的 512 維 condition embedding 就能透過 `class_labels` 參數直接傳入 U-Net，在內部與 timestep embedding 相加融合，並注入至每一個 ResNet block 中。此外，這種以線性層處理 multi-hot 向量的設計能支援 Classifier-Free Guidance (CFG)：當訓練或推論需要 unconditional 輸入時，只需傳入全為 0 的向量 $\mathbf{0} \in \mathbb{R}^{24}$ 即可作為 null condition。
 
 ```python
 # model/unet.py
@@ -96,7 +96,8 @@ def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Te
 ---
 
 ### Noise schedule
-在 Forward Diffusion Process 中，我使用 `DDPMScheduler` 管理時間步 $T = 1000$ 的雜訊排程，並支援 `squaredcos_cap_v2`（Cosine schedule）與 `linear` 排程。針對 $64 \times 64$ 這類解析度較低的影像，Cosine schedule（`squaredcos_cap_v2`）能讓 $\bar{\alpha}_t$ 以平滑的餘弦曲線遞減，避免像傳統 Linear schedule 在擴散前期過快破壞影像結構、或在後期殘留過多純雜訊時間步；而 Linear schedule（$\beta_1 = 10^{-4}$ 至 $\beta_T = 0.02$）則提供穩定的 baseline。給定乾淨影像 $\mathbf{x}_0$ 與任意時間步 $t$，可透過 closed-form 直接抽樣出 noise image $\mathbf{x}_t = \sqrt{\bar{\alpha}_t}\mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_t}\boldsymbol{\epsilon}$。
+
+針對 $64 \times 64$ 這類解析度較低的影像，Cosine schedule（`squaredcos_cap_v2`）能讓 $\bar{\alpha}_t$ 以平滑的餘弦曲線遞減，避免像傳統 Linear schedule 在擴散前中期過快破壞影像結構，導致後期 timestep 過早退化為純 noise 而浪費訓練資源；而 Linear schedule（$\beta_1 = 10^{-4}$ 至 $\beta_T = 0.02$）則提供穩定的 baseline。
 
 ```python
 # model/diffusion.py
@@ -119,7 +120,7 @@ def q_sample(self, x_0: torch.Tensor, t: torch.Tensor, noise: Optional[torch.Ten
 ---
 
 ### Timestep embedding
-為了讓 U-Net 知到當前影像處於哪一個去噪階段，時間步 $t \sim \text{Uniform}(\{0, \dots, T-1\})$ 會先透過 Sinusoidal Positional Embedding 轉換為 128 維的連續頻率特徵向量，接著在 `UNet2DModel` 內部經過兩層 Linear layer 與 `SiLU` activation 映射至 `time_embed_dim = 512` 維度。此 timestep embedding 會與前述同樣為 512 維的 condition embedding 直接相加（$\mathbf{e} = \mathbf{e}_t + \mathbf{e}_y$），再傳入各個 ResNet block 進行 feature modulation，使模型能在不同 noise level 下動態調整對 condition 與幾何輪廓的關注程度。
+在訓練階段，每個 batch 會隨機採樣 $t$ 並連同 x_t、y_cond 傳入模型，內部的 Sinusoidal Positional Embedding 與投影則由 UNet2DModel 自動處理
 
 ```python
 # model/diffusion.py
@@ -130,6 +131,11 @@ t = torch.randint(
     device=device,
     dtype=torch.long,
 )
+
+x_t, noise = self.q_sample(x_0, t)
+
+y_cond = self.drop_condition(y)
+
 pred = model(x_t, t, y_cond)
 ```
 
@@ -138,7 +144,8 @@ pred = model(x_t, t, y_cond)
 ### Loss
 模型採用 $\epsilon$-prediction（`prediction_type="epsilon"`）作為學習目標，即訓練神經網路預測在 Forward Process 中所加入的 Gaussian noise $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$，並以 Mean Squared Error (MSE) 作為損失函數：
 $$\mathcal{L}_{\text{simple}} = \mathbb{E}_{\mathbf{x}_0, \mathbf{y}, t, \boldsymbol{\epsilon}} \left[ \| \boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \tilde{\mathbf{y}}) \|_2^2 \right]$$
-為了強化生成影像對 **multi-label condition**的準確率，我採用了 **Classifier-Free Guidance (CFG)**。相較於傳統 Classifier Guidance 需要額外在各種加噪程度的影像 $\mathbf{x}_t$ 上訓練一個獨立的分類器並計算梯度，CFG 的核心思想是**讓同一個 U-Net 同時學習有條件（conditional, $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y})$）與無條件（unconditional, $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0})$）的雜訊預測**，並在**推論**時利用兩者的差值作為 implicit classifier gradient 的方向進行強化。$$\hat{\boldsymbol{\epsilon}} = \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) + w \cdot \underbrace{\left( \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y}) - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) \right)}_{\text{implicit classifier gradient direction}}$$ 為此，在訓練過程中我實作了 `drop_condition` 機制：每個樣本有 $p_{\text{uncond}} = 0.1$ 的機率將其 multi-hot 條件向量 $\mathbf{y}$ 清零為 null condition $\mathbf{0}$，使單一模型兼具條件與無條件生成能力。
+
+為了強化生成影像對 **multi-label condition** 的準確率，我採用了 **Classifier-Free Guidance (CFG)**。相較於傳統 Classifier Guidance 需要額外在各種加噪程度的影像 $\mathbf{x}_t$ 上訓練一個獨立的分類器並計算梯度，CFG 的核心思想是**讓同一個 U-Net 同時學習有條件（conditional, $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y})$）與無條件（unconditional, $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0})$）的雜訊預測**，並在**推論**時利用兩者的差值作為 implicit classifier gradient 的方向進行強化。$$\hat{\boldsymbol{\epsilon}} = \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) + w \cdot \underbrace{\left( \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y}) - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) \right)}_{\text{implicit classifier gradient direction}}$$ 為此，在訓練過程中我實作了 `drop_condition` 機制：每個樣本有 $p_{\text{uncond}} = 0.1$ 的機率將其 multi-hot 條件向量 $\mathbf{y}$ 清零為 null condition $\mathbf{0}$，使單一模型兼具條件與無條件生成能力。
 
 ```python
 # model/diffusion.py
@@ -159,10 +166,10 @@ def training_loss(self, model: nn.Module, x_0: torch.Tensor, y: torch.Tensor) ->
 ---
 
 ### Sampling method
-在反向生成階段，我整合了 Classifier-Free Guidance (CFG) 與能夠支援 `DDPM` / `DDIM` 兩種取樣流程。從標準常態分佈抽樣出初始雜訊 $\mathbf{x}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ 後，在每一個時間步 $t$，我將 unconditional 輸入（$\mathbf{0}$）與 conditional 輸入（$\mathbf{y}$）沿著 batch 維度拼接為 $2B$ 大小，藉由單次 forward pass 同時取得 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0})$ 與 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y})$，再透過 guidance scale $w$（預設為 `3.5`）進行線性外插：
+在 **denoising** 階段，我整合了 Classifier-Free Guidance (CFG) 與能夠支援 `DDPM` / `DDIM` 兩種取樣流程。從標準常態分佈抽樣出初始雜訊 $\mathbf{x}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ 後，在每一個時間步 $t$，將 unconditional 輸入（$\mathbf{0}$）與 conditional 輸入（$\mathbf{y}$）沿著 batch 維度拼接為 $2B$ 大小，藉由單次 forward pass 同時取得 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0})$ 與 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y})$，再透過 guidance scale $w$（預設為 `3.5`）進行線性外插：
 $$\hat{\boldsymbol{\epsilon}} = \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) + w \cdot \left( \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{y}) - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t, \mathbf{0}) \right)$$
-設定 $w > 1.0$ 能顯著強化生成影像與指定物件顏色、形狀的一致性，大幅提升 ResNet-18 evaluator 的辨識準確率。此外，透過 `_build_sampler` 切換 `DDPMScheduler` 或 `DDIMScheduler`，不僅能以經典的 DDPM 隨機反向過程取樣，也能利用 DDIM 在 `100` 步內快速完成高品質的確定性（$\eta = 0.0$）推論，並在每步將輸出 clamp 至 $[-1, 1]$ 以維持數值穩定。
-* **DDPM (`DDPMScheduler`)**：遵循隨機 Markovian 反向過程，每步加入隨機雜訊 $\sigma_t \mathbf{z}$：
+設定 $w > 1.0$ 能顯著強化生成影像與指定物件顏色、形狀的一致性，大幅提升 ResNet-18 evaluator 的辨識準確率。此外，透過 `_build_sampler` 切換 `DDPMScheduler` 或 `DDIMScheduler`，不僅能以經典的 DDPM 隨機 denoising 取樣，也能利用 DDIM 在 `100` 步內快速完成高品質的確定性（$\eta = 0.0$）推論，並在每步將輸出 clamp 至 $[-1, 1]$ 以維持數值穩定。
+* **DDPM (`DDPMScheduler`)**：遵循隨機 Markovian reverse process，每步加入隨機雜訊 $\sigma_t \mathbf{z}$：
   $$\mathbf{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}}\left(\mathbf{x}_t - \frac{1 - \alpha_t}{\sqrt{1 - \bar{\alpha}_t}}\hat{\boldsymbol{\epsilon}}_\theta\right) + \sigma_t \mathbf{z}, \quad \mathbf{z} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$$
 * **DDIM (`DDIMScheduler`)**：利用 Non-Markovian 跳步過程，當設定 $\eta = 0.0$ 時即為 deterministic 的 ODE 求解器，能以 `100` 個子時間步快速生成清晰且具高重現性的影像。
 此外，`sample()` 方法內建了 `return_trajectory` 機制，會等距記錄從純雜訊到最終成品共 8 個間點的 denosie snapshot。
@@ -227,17 +234,17 @@ def predict_cfg(
   <figcaption style="text-align:center;"><sub><b>Figure 2:</b> Results</sub></figcaption>
 </figure>
 
-從 Figure 2 可以看到，模型在 test.json 上達到了 88.89% (0.8889) 的高準確率，而 new_test.json 上也達到了 86.90% (0.8690)，兩者皆穩定超過 0.80 的基準門檻。這項結果證明了：
+從 **Figure 2** 可以看到，模型在 test.json 上達到了 88.89% (0.8889) 的高準確率，而 new_test.json 上也達到了 86.90% (0.8690)，兩者皆穩定超過 0.80 的基準門檻。這項結果證明了：
 
 - 標準 Conditional U-Net 架構的高效性：即使未採用複雜的 Cross-Attention 機制，單純透過兩層 MLP 將 24 維 Multi-hot conditional embedding 投影後與 Timestep Embedding 相加，並配合深層特徵圖（16×16 與 8×8）的 Spatial Self-Attention，一般的 2D U-Net 便足以精準捕捉多物件的顏色與幾何形狀特徵。
 - Compositional Generalizatio：test.json 與 new_test.json 的準確率差距僅約 2%，顯示模型並非死記訓練集中的特定物件組合，而是真正學會了將「顏色（8 種）」與「形狀（球體、立方體、圓柱體）」進行 semantic disentanglement，並在 Classifier-Free Guidance (w=3.5) 與 EMA 權重平滑的輔助下，穩定合成出符合條件的影像。
 
 <figure align="center">
   <img src="images/denoising_process.png" alt="替代文字">
-  <figcaption style="text-align:center;"><sub><b>Figure 3:</b> Denoising process</sub></figcaption>
+  <figcaption style="text-align:center;"><sub><b>Figure 3:</b> Condition {blue cube, yellow sphere, purple cylinder} denoising process</sub></figcaption>
 </figure>
 
-Figure 3 顯示出，從標準常態分佈 $N(0,I)$ 採樣出來的 Gaussian Noise，不帶有任何資訊，透過訓練好的 U-Net 逐步預測並減去雜訊，最後收斂出符合目標分佈與 Condition 的結果。
+**Figure 3** 顯示出，從標準常態分佈 $N(0,I)$ 採樣出來的 Gaussian Noise，不帶有任何資訊，透過訓練好的 U-Net 逐步預測並減去雜訊，最後收斂出符合目標分佈與 Condition 的結果。
 
 <figure align="center">
   <img src="images/grid_test.png" alt="替代文字">
@@ -260,8 +267,8 @@ Figure 3 顯示出，從標準常態分佈 $N(0,I)$ 採樣出來的 Gaussian Noi
 | **DDPM (Ours)** | 100 | 1.0 (Stochastic) | **88.89** | **86.90** | **87.90** |
 | **DDIM** | 100 | 0.0 (Deterministic) | 76.39 | 72.62 | 74.51 |
 
-從實驗結果可以觀察到，在相同的 100 步推論設定下，**DDPM 的平均準確率高出 DDIM 約 13.4%**。我從擴散過程的機制分析其原因如下：
-1. **Stochastic Error Correction**：DDIM ($\eta = 0.0$) 將反向過程視為 deterministic 的常微分方程（ODE）軌跡，過程中不再注入隨機雜訊（$\sigma_t = 0$）。在 i-CLEVR multi-label 生成圖片任務中，若去噪初期（高雜訊階段）某個物件的空間位置重疊或特徵強度不足，deterministic 軌跡無法在後續步驟跳出該局部狀態，導致初期預測誤差一路累積至 $\mathbf{x}_0$（容易出現漏畫物件或色彩混疊）。相對地，DDPM 在每一步皆注入隨機擾動 $\sigma_t \mathbf{z}$，類似 Langevin dynamics 的隨機探索，能打破早期的不良局部構圖，並配合 CFG ($w=3.5$) 的梯度持續將影像拉回正確的 data manifold 。
+從實驗結果可以觀察到，在相同的 100 步推論設定下，**DDPM 的平均準確率高出 DDIM 約 13.4%**。可以從 **diffusion process** 的機制分析其原因如下：
+1. **Stochastic Error Correction**：DDIM ($\eta = 0.0$) 將 **denoising process** 視為 deterministic 的常微分方程（ODE）軌跡，過程中不再注入隨機雜訊（$\sigma_t = 0$）。在 i-CLEVR multi-label 生成圖片任務中，若 denoising 初期（高雜訊階段）某個物件的空間位置重疊或特徵強度不足，deterministic 軌跡無法在後續步驟跳出該局部狀態，導致初期預測誤差一路累積至 $\mathbf{x}_0$（容易出現漏畫物件或色彩混疊）。相對地，DDPM 在每一步皆注入隨機擾動 $\sigma_t \mathbf{z}$，類似 Langevin dynamics 的隨機探索，能打破早期的不良局部構圖，並配合 CFG ($w=3.5$) 的梯度持續將影像拉回正確的 data manifold 。
 2. **高 Guidance Scale 下的截斷誤差緩衝**：在 $w = 3.5$ 的線性外插下，預測的 $\hat{\mathbf{x}}_0$ 較容易觸發 `clip_sample=True` 的 $[-1, 1]$ 邊界截斷。DDPM 每步注入的 Gaussion Noise 能有效平滑截斷帶來的數值僵化，使最終生成的 3D 幾何邊緣與光影更加自然，更符合 ResNet-18 Evaluator 的特徵分佈。
 
 ---
@@ -289,7 +296,7 @@ $$\theta_{\text{EMA}}^{(t)} = \beta_t \theta_{\text{EMA}}^{(t-1)} + (1 - \beta_t
    * **Learning rate scheduling 後期已自然收斂**：本實驗在訓練時採用了 **Cosine Annealing learning rate scheduling**並搭配 Gradient Clipping。因此在訓練後期，RAW weights 本身的參數更新幅度已經非常小，並未出現劇烈的梯度震盪，能精準貼合訓練末期對複雜多物件組合（如 `new_test.json` 中較密集的 3 物件條件）的微調成果。
    * **EMA Temporal Lag**：由於 EMA 採用高達 $\beta = 0.999$ 的衰減率（約等價於過去 1000 個 step 的指數加權平均），其權重包含了較早期的歷史參數軌跡。當模型在訓練後期針對高難度條件組合進一步提升特徵銳利度時，EMA 權重的更新會有些微 lag 與 smoothing，導致 ResNet-18 Evaluator 對少數重疊或相近色物體（如 `cyan` vs. `blue`、`purple` vs. `red`）的 Top-$k$ 信心度略低於最後一刻的 RAW 權重。
 3. **Evaluator Accuracy 與 Visual Fidelity 的權衡**：
-   * 雖然 RAW weights 在 ResNet-18 分類器上的平均分數略高 1.09%，但在 Figure 6 可以看到，左邊是 raw weights生成的，右邊為 EMA weights 生成的影像，以視覺品質來看，**EMA weights** 生成的背景更乾淨、幾何物體邊緣與光影更平滑；而 **RAW weights**生成的物體特徵與顏色對比通常較為銳利，這雖然有助於 ResNet-18 分類器辨識出正確類別，但偶爾會在邊緣伴隨些微的高頻雜訊。這也驗證了 EMA 的核心價值在於**減少生成畫面的高頻雜訊，並讓模型在不同測試集上的表現更加穩定一致**（EMA 在兩個測試集的落差僅 1.99%，而 RAW 的落差為 2.98%）。
+   * 雖然 RAW weights 在 ResNet-18 分類器上的平均分數略高 1.09%，但在 **Figure 6** 可以看到，左邊是 raw weights 生成的，右邊為 EMA weights 生成的影像，以視覺品質來看，**EMA weights** 生成的背景更乾淨、幾何物體邊緣與光影更平滑；而 **RAW weights**生成的物體特徵與顏色對比通常較為銳利，這雖然有助於 ResNet-18 分類器辨識出正確類別，但偶爾會在邊緣伴隨些微的高頻雜訊。這也驗證了 EMA 的核心價值在於**減少生成畫面的高頻雜訊，並讓模型在不同測試集上的表現更加穩定一致**（EMA 在兩個測試集的落差僅 1.99%，而 RAW 的落差為 2.98%）。
 
 <figure align="center">
   <img src="assets/new_test_0_RAW_2of3_vs_EMA_3of3.png" alt="替代文字">
@@ -356,7 +363,7 @@ $$\bar{\alpha}_t = \frac{f(t)}{f(0)}, \quad f(t) = \cos^2\left(\frac{t/T + s}{1 
   <figcaption style="text-align:center;"><sub><b>Figure 9:</b> Denoising Trajectory Comparison</sub></figcaption>
 </figure>
 
-從 **Figure 8** 與 **Figure 9** 的對照可以清楚驗證上述分析：在 Figure 8 中，Linear schedule（紅線）在反向過程的前大半段（$t = 1000 \to 400$）訊號保留率 $\bar{\alpha}_t$ 皆趨近於 $0$；對應到 **Figure 9** 下排的 `Linear` denoising 軌跡，從 Step 0 到 Step 5（$t \approx 1000 \to 286$）畫面幾乎仍為高頻雜訊，直到最後兩步（Step 6、Step 7）物件才成形，最終只成功畫出 2 個清晰物件（漏畫或重疊了第 3 個物件）。相對地，**Figure 9** 上排的 `Cosine (Ours)` 早在 Step 3 與 Step 4（$t \approx 571 \to 429$）便已清楚浮現出 3 個物件的空間構圖與色彩雛形，最終在 Step 7 穩定收斂出三個獨立且形狀銳利的幾何物件。
+從 **Figure 8** 與 **Figure 9** 的對照可以清楚驗證上述分析：在 Figure 8 中，Linear schedule（紅線）在 denoising process 的前大半段（$t = 1000 \to 400$）訊號保留率 $\bar{\alpha}_t$ 皆趨近於 $0$；對應到 **Figure 9** 下排的 `Linear` denoising 軌跡，從 Step 0 到 Step 5（$t \approx 1000 \to 286$）畫面幾乎仍為高頻雜訊，直到最後兩步（Step 6、Step 7）物件才成形，最終只成功畫出 2 個清晰物件（漏畫或重疊了第 3 個物件）。相對地，**Figure 9** 上排的 `Cosine (Ours)` 早在 Step 3 與 Step 4（$t \approx 571 \to 429$）便已清楚浮現出 3 個物件的空間構圖與色彩雛形，最終在 Step 7 穩定收斂出三個獨立且形狀銳利的幾何物件。
 
 ---
 
@@ -383,4 +390,4 @@ $$\bar{\alpha}_t = \frac{f(t)}{f(0)}, \quad f(t) = \cos^2\left(\frac{t/T + s}{1 
   <figcaption style="text-align:center;"><sub><b>Figure 10:</b> Visual and Evaluator comparison between models trained with <code>RandomHorizontalFlip(p=0.5)</code> (top row) and without horizontal flip <code>--no_flip</code> (bottom row) under identical test conditions.</sub></figcaption>
 </figure>
 
-從 **Figure 10** 的對照案例可以直觀看出：在 `With Flip`（上排）中，由於模型同時學習了左右相反的光源分佈，部分生成物件的表面高光與地面投射陰影較為模糊或方向不一致，導致 ResNet-18 Evaluator 容易將相近幾何形狀（如 `cylinder` 與 `cube`）或相近色系混淆（僅命中 $2/3$）；而在 `Without Flip`（下排）中，所有物件的高光位置與陰影投射方向高度一致、3D 幾何稜角與曲率更加銳利，使分類器能穩定達到 $3/3$ 的 $100\%$ 辨識率。
+從 **Figure 10** 的對照案例可以直觀看出：在 `With Flip`（上排）中，由於模型同時學習了左右相反的光源分佈，部分生成物件的表面高光與地面投射陰影較為模糊或方向不一致，導致 ResNet-18 Evaluator 容易將相近幾何形狀（如球體與圓柱體）或相近色系混淆（僅命中 $2/3$）；而在 `Without Flip`（下排）中，所有物件的高光位置與陰影投射方向高度一致、3D 幾何稜角與曲率更加銳利，使分類器能穩定達到 $3/3$ 的 $100\%$ 辨識率。
