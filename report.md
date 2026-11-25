@@ -15,7 +15,7 @@
 ---
 
 ### Data preprocessing & augmentation
-在資料前處理階段（src/dataset.py），ICLEVRDataset 會將原始影像統一 resize 至 $64 \times 64$，並透過 `transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))` 將像素值從 $[0,1]$線性映射至 $[−1,1]$，使其與 diffusion model 最終的 **Gaussion Noise** 先驗分佈 $N(0,I)$ 的數值範圍對齊。在 **Data Augmentation** 方面，由於 i-CLEVR 的條件僅指定「出現哪些顏色與形狀的物件」（例如 ["blue cube", "yellow sphere"]），並未限制物件在畫面中的左右相對位置，且3D場景中的光源與地面幾何在水平翻轉下依然合理，因此我引入了機率為 0.5 的 `RandomHorizontalFlip`。這能將訓練樣本的多樣性提高一倍並避免模型記住固定構圖；相對地，刻意不使用垂直翻轉或 Color Jitter ，以免破壞地板與陰影的物理方向或改變物件的顏色標籤語意。
+在資料前處理階段（src/dataset.py），ICLEVRDataset 會將原始影像統一 resize 至 $64 \times 64$，並透過 `transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))` 將像素值從 $[0,1]$線性映射至 $[−1,1]$，使其與 diffusion model 最終的 **Gaussian Noise** 先驗分佈 $N(0,I)$ 的數值範圍對齊。在 **Data Augmentation** 方面，由於 i-CLEVR 的條件僅指定「出現哪些顏色與形狀的物件」（例如 ["blue cube", "yellow sphere"]），並未限制物件在畫面中的左右相對位置，且3D場景中的光源與地面幾何在水平翻轉下依然合理，因此我引入了機率為 0.5 的 `RandomHorizontalFlip`。這能將訓練樣本的多樣性提高一倍並避免模型記住固定構圖；相對地，刻意不使用垂直翻轉或 Color Jitter ，以免破壞地板與陰影的物理方向或改變物件的顏色標籤語意。
 ```python
 # src/dataset.py
 tf_list = [transforms.Resize((image_size, image_size))]
@@ -269,13 +269,13 @@ def predict_cfg(
 
 從實驗結果可以觀察到，在相同的 100 步推論設定下，**DDPM 的平均準確率高出 DDIM 約 13.4%**。可以從 **diffusion process** 的機制分析其原因如下：
 1. **Stochastic Error Correction**：DDIM ($\eta = 0.0$) 將 **denoising process** 視為 deterministic 的常微分方程（ODE）軌跡，過程中不再注入隨機雜訊（$\sigma_t = 0$）。在 i-CLEVR multi-label 生成圖片任務中，若 denoising 初期（高雜訊階段）某個物件的空間位置重疊或特徵強度不足，deterministic 軌跡無法在後續步驟跳出該局部狀態，導致初期預測誤差一路累積至 $\mathbf{x}_0$（容易出現漏畫物件或色彩混疊）。相對地，DDPM 在每一步皆注入隨機擾動 $\sigma_t \mathbf{z}$，類似 Langevin dynamics 的隨機探索，能打破早期的不良局部構圖，並配合 CFG ($w=3.5$) 的梯度持續將影像拉回正確的 data manifold 。
-2. **高 Guidance Scale 下的截斷誤差緩衝**：在 $w = 3.5$ 的線性外插下，預測的 $\hat{\mathbf{x}}_0$ 較容易觸發 `clip_sample=True` 的 $[-1, 1]$ 邊界截斷。DDPM 每步注入的 Gaussion Noise 能有效平滑截斷帶來的數值僵化，使最終生成的 3D 幾何邊緣與光影更加自然，更符合 ResNet-18 Evaluator 的特徵分佈。
+2. **高 Guidance Scale 下的截斷誤差緩衝**：在 $w = 3.5$ 的線性外插下，預測的 $\hat{\mathbf{x}}_0$ 較容易觸發 `clip_sample=True` 的 $[-1, 1]$ 邊界截斷。DDPM 每步注入的 Gaussian Noise 能有效平滑截斷帶來的數值僵化，使最終生成的 3D 幾何邊緣與光影更加自然，更符合 ResNet-18 Evaluator 的特徵分佈。
 
 ---
 
 #### EMA vs. Raw
 
-在 Diffusion Model 的訓練過程中，由於每個 step 都會隨機抽樣時間步 $t$、Gaussion Noise $\epsilon$ 以及以 $p_{\text{uncond}}=0.1$ Classifier-Free Guidance dropout，目標函數的梯度具有較高的隨機性與方差。若直接使用最後一步的 RAW weights 進行推論，模型參數容易受到最後幾個 mini-batch 的梯度震盪影響。
+在 Diffusion Model 的訓練過程中，由於每個 step 都會隨機抽樣時間步 $t$、Gaussian Noise $\epsilon$ 以及以 $p_{\text{uncond}}=0.1$ Classifier-Free Guidance dropout，目標函數的梯度具有較高的隨機性與方差。若直接使用最後一步的 RAW weights 進行推論，模型參數容易受到最後幾個 mini-batch 的梯度震盪影響。
 
 為了穩定生成品質，我在訓練時維護了一組 **Exponential Moving Average, EMA** 權重，更新公式如下：
 
@@ -351,7 +351,7 @@ $$\bar{\alpha}_t = \frac{f(t)}{f(0)}, \quad f(t) = \cos^2\left(\frac{t/T + s}{1 
 1. **Cosine Schedule 在兩組測試集全面領先（平均提升 $+5.68\%$）**：
    * 在 `test.json` 上，Cosine 排程較 Linear 提升了 **$4.17\%$**（$88.89\%$ vs. $84.72\%$）；而在多物件組合更密集的 `new_test.json` 上，領先幅度更擴大至 **$7.18\%$**（$86.90\%$ vs. $79.72\%$）。
 2. **低解析度影像（$64 \times 64$）下的訊噪比（SNR）衰減特性**：
-   * **Linear schedule 的前中期過快崩潰問題**：Linear schedule 最初是針對 $256 \times 256$ 高解析度影像所設計。在 $64 \times 64$ 的低解析度影像中，空間像素冗餘度較低，Linear schedule 的 $\bar{\alpha}_t$ 在擴散前中期便迅速衰減至接近 $0$，導致時間步後段（$t \to T$）有高比例的區間幾乎退化為 Pure Gaussion noise，造成訓練步數的浪費。
+   * **Linear schedule 的前中期過快崩潰問題**：Linear schedule 最初是針對 $256 \times 256$ 高解析度影像所設計。在 $64 \times 64$ 的低解析度影像中，空間像素冗餘度較低，Linear schedule 的 $\bar{\alpha}_t$ 在擴散前中期便迅速衰減至接近 $0$，導致時間步後段（$t \to T$）有高比例的區間幾乎退化為 Pure Gaussian noise，造成訓練步數的浪費。
    * **Cosine schedule 的平滑過渡優勢**：Cosine schedule 讓 $\bar{\alpha}_t$ 在中間時間步（$t \in [200, 800]$）呈現近乎線性的平緩下降。這正是 diffusion model 決定「多個物件的空間配置與幾何輪廓」的階段，充裕的時間步讓 U-Net 能更從容的 decouple 3 個物件的位置與形狀，因此在高難度的 `new_test.json` 上展現出顯著優勢。
 
 <figure align="center">
